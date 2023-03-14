@@ -1,0 +1,164 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+schedules:
+- cron: "0 9,19 * * Mon,Tue,Wed,Thu,Fri,Sat"
+  batch: true
+  branches:
+    include:
+    - master
+  always: true
+  displayName: Cron schedule
+
+trigger:
+- releases/*
+
+resources:
+  repositories:
+    - repository: QA_PayUI-Framework
+      name: QA_PayUI-Framework
+      type: git
+      ref: merge_xunit
+    - repository: QA_Payroll-Resources
+      name: QA_Payroll-Resources
+      type: git
+      ref: r$(tag)
+    - repository: QA_Payroll-Tests
+      name: QA_Payroll-Tests
+      type: git
+      ref: r$(tag)
+    - repository: QA_hrXBODUtils
+      name: QA_hrXBODUtils
+      type: git
+      ref: azure
+    - repository: QA_ExchangeUI-Framework
+      name: QA_ExchangeUI-Framework
+      type: git
+    - repository: QA_hrXHTTPLibrary
+      name: QA_hrXHTTPLibrary
+      type: git
+pool:
+  vmImage: windows-latest
+
+stages:
+- stage: CompareBuilds
+  displayName: CompareBuilds
+  jobs:
+  - job: CompareBuilds
+    pool: 
+      name: 'Core WEU Windows'
+      demands:  
+        - agent.name -equals hosazr01azdo04
+    timeoutInMinutes: 5
+    steps:
+    - task: PowerShell@2
+      inputs:
+        targetType: 'filePath'
+        filePath: 02-CompareTagVersion.ps1 
+        arguments: -lv_env $(env) -lv_env2 $(env2) -lv_basicAuth $(lv_basicAuth) 
+      displayName: Comparison Report   
+
+- stage: Tests
+  jobs:
+  - job: TongaExpress_Limited
+    timeoutInMinutes: 300
+
+    strategy:
+      matrix:
+        dashboard_suite:
+            tag: tst-z01.ciANDexpress_limitedANDmodule:dashboard
+            artifactname: RFLogsSuite_dashboard_suite
+        documents_suite:
+            tag: tst-z01.ciANDexpress_limitedANDmodule:documents
+            artifactname: RFLogsSuite_documents_suite
+        payslip_payroll_suite:
+            tag: tst-z01.ciANDexpress_limitedANDmodule:payslip --tag tst-z01.ciANDexpress_limitedANDmodule:payroll
+            artifactname: RFLogsSuite_payslip_payroll_suite
+        settingsworkbook_suite:
+            tag: tst-z01.ciANDexpress_limitedANDmodule:settings --tag tst-z01.ciANDexpress_limitedANDmodule:workbook
+            artifactname: RFLogsSuite_settingsworkbook_suite
+        reports_suite:
+            tag: tst-z01.ciANDexpress_limitedANDmodule:reports
+            artifactname: RFLogsSuite_reports_suite
+
+      maxParallel: 2
+    
+    steps:
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.8'
+        addToPath: true
+        architecture: 'x64'
+    
+    - checkout: QA_Payroll-Resources
+    - checkout: QA_PayUI-Framework
+    - checkout: QA_Payroll-Tests
+    - checkout: QA_hrXBODUtils
+    - checkout: QA_ExchangeUI-Framework
+    - checkout: QA_hrXHTTPLibrary
+    
+    - script: |
+        c:\hostedtoolcache\windows\python\3.8.10\x64\python.exe -m pip install --upgrade pip
+        cd $(Pipeline.Workspace)/s/QA_PayUI-Framework
+        pip install -r requirements.txt --use-pep517
+      displayName: 'Install Python Libraries'
+      continueOnError: true
+      failOnStderr: false
+
+    - task: PowerShell@2
+      inputs:
+        targetType: 'inline'
+        script: |
+          cd $(Pipeline.Workspace)/s/QA_PayUI-Framework
+          python run_tests.py --project QA_Payroll-Tests\TongaExpress --tag $(tag) --marionette --xunitfile outputxunit.xml --loglevel TRACE  --rerunfailedsuites  --variables=Browser:Chrome,SYS:TST-Z01,t_use_proxy:False
+      displayName: 'Run Tests'
+      continueOnError: true
+    
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results'
+      continueOnError: true
+      inputs:
+        testResultsFiles: $(Pipeline.Workspace)/s/QA_PayUI-Framework/test/results/QA_Payroll-Tests/outputxunit.xml
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Pipeline.Workspace)/s/QA_PayUI-Framework/test/results/QA_Payroll-Tests/'
+        artifact: $(artifactname)
+        publishLocation: 'pipeline'
+    
+    - bash: |
+        echo AGENT_JOBSTATUS = $AGENT_JOBSTATUS
+        if [[ "$AGENT_JOBSTATUS" == "SucceededWithIssues" ]]; then exit 1; fi
+      displayName: Fail build if partially successful
+
+- stage: UpdateBuild
+  displayName: UpdateBuild
+  jobs:
+  - job: UpdateBuild
+    pool: 
+      name: 'Core WEU Windows'
+      demands:  
+        - agent.name -equals hosazr01azdo04
+    condition: succeeded()
+    timeoutInMinutes: 2 
+    steps:
+    - task: PowerShell@2
+      displayName: 'Set BuildName'
+      inputs:
+        targetType: 'inline'
+        script: |
+            #[string] $buildName = ${{ variables.TestJobName }}
+            #Write-Host "Setting the name of the build to '$buildName'."
+            Write-Host "##vso[build.updatebuildnumber]$(TestJobName)-$(env)-$(gcc)"
+            #Write-Host "##vso[build.updatereleasename]$(env)-$(gcc)"
+
+    - task: PowerShell@2
+      inputs:
+        targetType: 'filePath'
+        filePath: 01-AddTagToBuilds.ps1 
+        arguments: -lv_env $(env) -lv_env2 $(env2) -lv_basicAuth $(lv_basicAuth)
+
+      displayName: 'Set Tags'
+      continueOnError: true
